@@ -1,29 +1,30 @@
 # ============================================================
-#  QQQ Trading Strategy — Standalone Backtest
+#  QQQ Trading Strategy — BQNT Backtest
 #  Strategy : Adaptive Momentum + Mean-Reversion Hybrid
 #  Universe  : QQQ US Equity
-#  Data      : Yahoo Finance via yfinance (free, no Bloomberg needed)
+#  Data      : Bloomberg BQL
+#  Charts    : matplotlib + plotly (no bqviz dependency)
 # ============================================================
 #
 #  HOW TO RUN
 #  ----------
-#  1. Install dependencies:  pip install yfinance pandas numpy matplotlib
-#  2. Run:  python3 qqq_strategy_bqnt.py
-#  3. Adjust CONFIG section to taste
-#
-#  To run inside Bloomberg BQNT instead, replace the yfinance
-#  data section with bql calls and add:  import bql, import bqviz
+#  1. Open a BQNT notebook session (BQNT <GO> in the terminal)
+#  2. Install chart deps if needed:  pip install matplotlib plotly
+#  3. Paste or import this file and run top-to-bottom
+#  4. Adjust CONFIG section to taste
 # ============================================================
 
-import yfinance as yf
+import bql
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime
 
 # ── 1. CONFIG ───────────────────────────────────────────────
-TICKER          = "QQQ"
+TICKER          = "QQQ US Equity"
 START_DATE      = "2010-01-01"
 END_DATE        = datetime.today().strftime("%Y-%m-%d")
 INITIAL_CASH    = 1_000_000   # $1 M notional
@@ -48,11 +49,38 @@ STOP_ATR_MULT   = 2.5         # stop = entry_price − 2.5 × ATR
 VOL_TARGET      = 0.15        # 15 % annualised volatility target for sizing
 TRADING_DAYS    = 252
 
-# ── 2. DATA FETCH (yfinance) ────────────────────────────────
-raw = yf.download(TICKER, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
+# ── 2. DATA FETCH (BQL) ─────────────────────────────────────
+bq = bql.Service()
 
-prices = raw[["Close", "High", "Low", "Volume"]].copy()
-prices.columns = ["close", "high", "low", "volume"]
+request = bql.Request(
+    TICKER,
+    {
+        "px_close":  bq.data.px_last(
+            dates=bq.func.range(START_DATE, END_DATE), fill="prev", currency="USD"
+        ),
+        "px_high":   bq.data.px_high(
+            dates=bq.func.range(START_DATE, END_DATE), fill="prev"
+        ),
+        "px_low":    bq.data.px_low(
+            dates=bq.func.range(START_DATE, END_DATE), fill="prev"
+        ),
+        "px_volume": bq.data.px_volume(
+            dates=bq.func.range(START_DATE, END_DATE), fill="prev"
+        ),
+    }
+)
+
+response = bq.execute(request)
+
+def _extract(key):
+    return (
+        bql.combined_df(response[key])
+        .droplevel("ID", axis=1)
+        .squeeze()
+        .rename(key.split("_", 1)[1])
+    )
+
+prices = pd.concat([_extract(k) for k in ("px_close", "px_high", "px_low", "px_volume")], axis=1)
 prices.index = pd.to_datetime(prices.index)
 prices.sort_index(inplace=True)
 prices.dropna(inplace=True)
@@ -251,6 +279,11 @@ print(metrics.to_string())
 print(f"{divider}\n")
 
 # ── 8. VISUALISATION ────────────────────────────────────────
+#  8a. Static export — matplotlib (PNG, good for reports / email)
+# ────────────────────────────────────────────────────────────
+dd_strat = (bt["equity_strat"] - bt["equity_strat"].cummax()) / bt["equity_strat"].cummax()
+dd_bh    = (bt["equity_bh"]    - bt["equity_bh"].cummax())    / bt["equity_bh"].cummax()
+
 fig, axes = plt.subplots(
     4, 1, figsize=(14, 18), sharex=True,
     gridspec_kw={"height_ratios": [3, 1.5, 1, 1]}
@@ -258,23 +291,19 @@ fig, axes = plt.subplots(
 fig.suptitle("QQQ — Adaptive Momentum + Mean-Reversion Backtest",
              fontsize=13, fontweight="bold")
 
-# ─ Panel 1: Price + indicators ─
 ax1 = axes[0]
-ax1.plot(prices.index, prices["close"],  label="QQQ Close",         color="#1f77b4", lw=1.2)
-ax1.plot(ind.index,    ind["ema_fast"],  label=f"EMA {EMA_FAST}",   color="#ff7f0e", lw=0.9, ls="--")
-ax1.plot(ind.index,    ind["ema_slow"],  label=f"EMA {EMA_SLOW}",   color="#2ca02c", lw=0.9, ls="--")
-ax1.plot(ind.index,    ind["sma_trend"], label=f"SMA {TREND_SMA}",  color="#d62728", lw=0.9, ls=":")
+ax1.plot(prices.index, prices["close"],  label="QQQ Close",        color="#1f77b4", lw=1.2)
+ax1.plot(ind.index,    ind["ema_fast"],  label=f"EMA {EMA_FAST}",  color="#ff7f0e", lw=0.9, ls="--")
+ax1.plot(ind.index,    ind["ema_slow"],  label=f"EMA {EMA_SLOW}",  color="#2ca02c", lw=0.9, ls="--")
+ax1.plot(ind.index,    ind["sma_trend"], label=f"SMA {TREND_SMA}", color="#d62728", lw=0.9, ls=":")
 ax1.fill_between(ind.index, ind["bb_lower"], ind["bb_upper"],
                  alpha=0.07, color="grey", label="Bollinger Bands")
-ax1.fill_between(bt.index,
-                 prices["close"].min(), prices["close"].max(),
-                 where=(bt["signal"] > 0),
-                 alpha=0.10, color="green", label="Long exposure")
+ax1.fill_between(bt.index, prices["close"].min(), prices["close"].max(),
+                 where=(bt["signal"] > 0), alpha=0.10, color="green", label="Long exposure")
 ax1.set_ylabel("Price (USD)")
 ax1.legend(loc="upper left", fontsize=8, ncol=3)
 ax1.grid(True, alpha=0.3)
 
-# ─ Panel 2: Equity curves ─
 ax2 = axes[1]
 ax2.plot(bt.index, bt["equity_strat"] / INITIAL_CASH, label="Strategy",   color="#2ca02c", lw=1.5)
 ax2.plot(bt.index, bt["equity_bh"]    / INITIAL_CASH, label="Buy & Hold", color="#1f77b4", lw=1.5, ls="--")
@@ -282,10 +311,7 @@ ax2.set_ylabel("Normalised Equity")
 ax2.legend(loc="upper left", fontsize=8)
 ax2.grid(True, alpha=0.3)
 
-# ─ Panel 3: Drawdown ─
 ax3 = axes[2]
-dd_strat = (bt["equity_strat"] - bt["equity_strat"].cummax()) / bt["equity_strat"].cummax()
-dd_bh    = (bt["equity_bh"]    - bt["equity_bh"].cummax())    / bt["equity_bh"].cummax()
 ax3.fill_between(bt.index, dd_strat, 0, alpha=0.65, color="#2ca02c", label="Strategy DD")
 ax3.fill_between(bt.index, dd_bh,    0, alpha=0.30, color="#1f77b4", label="Buy & Hold DD")
 ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
@@ -293,7 +319,6 @@ ax3.set_ylabel("Drawdown")
 ax3.legend(loc="lower left", fontsize=8)
 ax3.grid(True, alpha=0.3)
 
-# ─ Panel 4: RSI ─
 ax4 = axes[3]
 ax4.plot(ind.index, ind["rsi"], color="#9467bd", lw=0.9, label="RSI 14")
 ax4.axhline(RSI_OVERSOLD,   color="green", lw=0.8, ls="--")
@@ -307,16 +332,101 @@ ax4.set_ylim(0, 100)
 ax4.set_ylabel("RSI")
 ax4.legend(loc="upper left", fontsize=8)
 ax4.grid(True, alpha=0.3)
-
 ax4.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 ax4.xaxis.set_major_locator(mdates.YearLocator(2))
 plt.xticks(rotation=30)
 plt.tight_layout()
 
-output_file = "qqq_strategy_backtest.png"
-plt.savefig(output_file, dpi=150, bbox_inches="tight")
+png_file = "qqq_strategy_backtest.png"
+plt.savefig(png_file, dpi=150, bbox_inches="tight")
 plt.show()
-print(f"Chart saved → {output_file}")
+print(f"Static chart saved → {png_file}")
+
+# ────────────────────────────────────────────────────────────
+#  8b. Interactive chart — plotly (zoom, hover, pan in browser)
+# ────────────────────────────────────────────────────────────
+pfig = make_subplots(
+    rows=4, cols=1, shared_xaxes=True,
+    row_heights=[0.40, 0.25, 0.18, 0.17],
+    vertical_spacing=0.03,
+    subplot_titles=(
+        "QQQ Price + Signals",
+        "Equity Curve",
+        "Drawdown",
+        f"RSI ({RSI_PERIOD})",
+    ),
+)
+
+# Panel 1 — price, MAs, BB, long shading
+pfig.add_trace(go.Scatter(x=prices.index, y=prices["close"],
+    name="QQQ Close", line=dict(color="#1f77b4", width=1.5)), row=1, col=1)
+pfig.add_trace(go.Scatter(x=ind.index, y=ind["ema_fast"],
+    name=f"EMA {EMA_FAST}", line=dict(color="#ff7f0e", width=1, dash="dash")), row=1, col=1)
+pfig.add_trace(go.Scatter(x=ind.index, y=ind["ema_slow"],
+    name=f"EMA {EMA_SLOW}", line=dict(color="#2ca02c", width=1, dash="dash")), row=1, col=1)
+pfig.add_trace(go.Scatter(x=ind.index, y=ind["sma_trend"],
+    name=f"SMA {TREND_SMA}", line=dict(color="#d62728", width=1, dash="dot")), row=1, col=1)
+pfig.add_trace(go.Scatter(                           # BB upper + lower filled
+    x=pd.concat([ind.index.to_series(), ind.index.to_series()[::-1]]),
+    y=pd.concat([ind["bb_upper"], ind["bb_lower"][::-1]]),
+    fill="toself", fillcolor="rgba(150,150,150,0.10)",
+    line=dict(color="rgba(150,150,150,0.30)", width=0.5),
+    name="Bollinger Bands", showlegend=True,
+), row=1, col=1)
+
+# Shade long periods as green rectangles
+long_start = None
+for i, idx in enumerate(bt.index):
+    is_long = bt["signal"].iloc[i] > 0
+    if is_long and long_start is None:
+        long_start = idx
+    elif not is_long and long_start is not None:
+        pfig.add_vrect(x0=long_start, x1=idx,
+            fillcolor="rgba(0,200,0,0.07)", layer="below", line_width=0, row=1, col=1)
+        long_start = None
+if long_start is not None:
+    pfig.add_vrect(x0=long_start, x1=bt.index[-1],
+        fillcolor="rgba(0,200,0,0.07)", layer="below", line_width=0, row=1, col=1)
+
+# Panel 2 — equity curves
+pfig.add_trace(go.Scatter(x=bt.index, y=bt["equity_strat"] / INITIAL_CASH,
+    name="Strategy", line=dict(color="#2ca02c", width=2)), row=2, col=1)
+pfig.add_trace(go.Scatter(x=bt.index, y=bt["equity_bh"] / INITIAL_CASH,
+    name="Buy & Hold", line=dict(color="#1f77b4", width=2, dash="dash")), row=2, col=1)
+
+# Panel 3 — drawdown
+pfig.add_trace(go.Scatter(x=bt.index, y=dd_strat,
+    fill="tozeroy", name="Strategy DD",
+    line=dict(color="#2ca02c", width=0.5),
+    fillcolor="rgba(44,160,44,0.35)"), row=3, col=1)
+pfig.add_trace(go.Scatter(x=bt.index, y=dd_bh,
+    fill="tozeroy", name="Buy & Hold DD",
+    line=dict(color="#1f77b4", width=0.5),
+    fillcolor="rgba(31,119,180,0.20)"), row=3, col=1)
+
+# Panel 4 — RSI
+pfig.add_trace(go.Scatter(x=ind.index, y=ind["rsi"],
+    name="RSI", line=dict(color="#9467bd", width=1)), row=4, col=1)
+pfig.add_hline(y=RSI_OVERSOLD,   line=dict(color="green", dash="dash", width=0.8), row=4, col=1)
+pfig.add_hline(y=RSI_OVERBOUGHT, line=dict(color="red",   dash="dash", width=0.8), row=4, col=1)
+pfig.add_hline(y=50,             line=dict(color="grey",  width=0.5),              row=4, col=1)
+
+pfig.update_layout(
+    title="QQQ — Adaptive Momentum + Mean-Reversion Backtest (Interactive)",
+    height=900,
+    template="plotly_white",
+    hovermode="x unified",
+    legend=dict(orientation="h", y=1.02, x=0),
+)
+pfig.update_yaxes(title_text="Price (USD)",       row=1, col=1)
+pfig.update_yaxes(title_text="Norm. Equity",      row=2, col=1)
+pfig.update_yaxes(title_text="Drawdown", tickformat=".0%", row=3, col=1)
+pfig.update_yaxes(title_text="RSI", range=[0, 100], row=4, col=1)
+
+html_file = "qqq_strategy_backtest.html"
+pfig.write_html(html_file)
+pfig.show()   # opens in browser (or BQNT notebook inline)
+print(f"Interactive chart saved → {html_file}")
 
 # ── 9. TRADE LOG (optional) ─────────────────────────────────
 entries = bt.index[bt["signal"].diff() == 1]
