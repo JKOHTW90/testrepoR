@@ -1,20 +1,21 @@
 # ============================================================
-#  QQQ Trading Strategy — BQNT Backtest
+#  QQQ Trading Strategy — Standalone Backtest
 #  Strategy : Adaptive Momentum + Mean-Reversion Hybrid
 #  Universe  : QQQ US Equity
-#  Platform  : Bloomberg Quant (BQNT)
+#  Data      : Yahoo Finance via yfinance (free, no Bloomberg needed)
 # ============================================================
 #
 #  HOW TO RUN
 #  ----------
-#  1. Open a BQNT notebook session (BQNT <GO> in the terminal)
-#  2. Paste or import this file
-#  3. Run all cells top-to-bottom
-#  4. Adjust CONFIG section to taste before running
+#  1. Install dependencies:  pip install yfinance pandas numpy matplotlib
+#  2. Run:  python3 qqq_strategy_bqnt.py
+#  3. Adjust CONFIG section to taste
+#
+#  To run inside Bloomberg BQNT instead, replace the yfinance
+#  data section with bql calls and add:  import bql, import bqviz
 # ============================================================
 
-import bql
-import bqviz as bv          # Bloomberg visualisation helper
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -22,7 +23,7 @@ import matplotlib.dates as mdates
 from datetime import datetime
 
 # ── 1. CONFIG ───────────────────────────────────────────────
-TICKER          = "QQQ US Equity"
+TICKER          = "QQQ"
 START_DATE      = "2010-01-01"
 END_DATE        = datetime.today().strftime("%Y-%m-%d")
 INITIAL_CASH    = 1_000_000   # $1 M notional
@@ -47,38 +48,11 @@ STOP_ATR_MULT   = 2.5         # stop = entry_price − 2.5 × ATR
 VOL_TARGET      = 0.15        # 15 % annualised volatility target for sizing
 TRADING_DAYS    = 252
 
-# ── 2. DATA FETCH (BQL) ─────────────────────────────────────
-bq = bql.Service()
+# ── 2. DATA FETCH (yfinance) ────────────────────────────────
+raw = yf.download(TICKER, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
 
-request = bql.Request(
-    TICKER,
-    {
-        "px_close":  bq.data.px_last(
-            dates=bq.func.range(START_DATE, END_DATE), fill="prev", currency="USD"
-        ),
-        "px_high":   bq.data.px_high(
-            dates=bq.func.range(START_DATE, END_DATE), fill="prev"
-        ),
-        "px_low":    bq.data.px_low(
-            dates=bq.func.range(START_DATE, END_DATE), fill="prev"
-        ),
-        "px_volume": bq.data.px_volume(
-            dates=bq.func.range(START_DATE, END_DATE), fill="prev"
-        ),
-    }
-)
-
-response = bq.execute(request)
-
-def _extract(key):
-    return (
-        bql.combined_df(response[key])
-        .droplevel("ID", axis=1)
-        .squeeze()
-        .rename(key.split("_", 1)[1])   # "px_close" → "close"
-    )
-
-prices = pd.concat([_extract(k) for k in ("px_close", "px_high", "px_low", "px_volume")], axis=1)
+prices = raw[["Close", "High", "Low", "Volume"]].copy()
+prices.columns = ["close", "high", "low", "volume"]
 prices.index = pd.to_datetime(prices.index)
 prices.sort_index(inplace=True)
 prices.dropna(inplace=True)
